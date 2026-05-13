@@ -4,6 +4,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import config
 from services import guild_config_service, sheets_service
 
 
@@ -44,8 +45,12 @@ def _empty_guild(guild_id: int | str) -> dict:
     }
 
 
+def economy_path() -> Path:
+    return Path(config.FORGELENS_ECONOMY_PATH or ECONOMY_FILE)
+
+
 def _load_store() -> dict:
-    path = Path(ECONOMY_FILE)
+    path = economy_path()
     if not path.exists():
         return _empty_store()
     with path.open(encoding="utf-8") as f:
@@ -55,7 +60,8 @@ def _load_store() -> dict:
 
 
 def _save_store(data: dict) -> None:
-    path = Path(ECONOMY_FILE)
+    path = economy_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -451,12 +457,13 @@ def settle_line(
     total_pool = sum(int(w["amount"]) for w in wagers)
     winning_wagers = [w for w in wagers if w["option"].lower() == winner.lower()]
     winning_pool = sum(int(w["amount"]) for w in winning_wagers)
+    payout_amounts = _pool_payouts(winning_wagers, total_pool, winning_pool)
     payouts = []
 
     for wager in wagers:
         wager["updated_at"] = _now()
         if wager in winning_wagers and winning_pool > 0:
-            payout = round((int(wager["amount"]) / winning_pool) * total_pool)
+            payout = payout_amounts[wager["wager_id"]]
             wallet = guild["wallets"][wager["user_id"]]
             wallet["balance"] = int(wallet["balance"]) + payout
             wallet["updated_at"] = _now()
@@ -482,6 +489,30 @@ def settle_line(
     _append_audit(guild, "line.settle", actor_id, line["line_id"], {"winner": winner, "payouts": payouts})
     _save_store(data)
     return {"line": line, "payouts": payouts, "total_pool": total_pool, "winning_pool": winning_pool}
+
+
+def _pool_payouts(winning_wagers: list[dict], total_pool: int, winning_pool: int) -> dict[str, int]:
+    if not winning_wagers or winning_pool <= 0 or total_pool <= 0:
+        return {}
+
+    shares = []
+    allocated = 0
+    for wager in winning_wagers:
+        numerator = int(wager["amount"]) * total_pool
+        base = numerator // winning_pool
+        remainder = numerator % winning_pool
+        allocated += base
+        shares.append({
+            "wager_id": wager["wager_id"],
+            "base": base,
+            "remainder": remainder,
+        })
+
+    payouts = {share["wager_id"]: share["base"] for share in shares}
+    leftover = total_pool - allocated
+    for share in sorted(shares, key=lambda item: (-item["remainder"], item["wager_id"]))[:leftover]:
+        payouts[share["wager_id"]] += 1
+    return payouts
 
 
 def void_line(guild_id: int | str, line_id: str, actor_id: int | str, reason: str) -> dict:
@@ -552,10 +583,71 @@ def record_ledger_post(
     return post
 
 
-def transactions(guild_id: int | str, limit: int = 20) -> list[dict]:
+def transactions(guild_id: int | str, user_id: int | str | None = None, limit: int = 20) -> list[dict]:
     data = _load_store()
     guild = _guild(data, guild_id)
-    return list(reversed(guild["transactions"]))[:limit]
+    txs = list(reversed(guild["transactions"]))
+    if user_id is not None:
+        txs = [tx for tx in txs if tx["user_id"] == str(user_id)]
+    return txs[:limit]
+
+
+def audit_events(guild_id: int | str, target: str = "", limit: int = 20) -> list[dict]:
+    data = _load_store()
+    guild = _guild(data, guild_id)
+    events = list(reversed(guild["audit"]))
+    if target:
+        normalized = target.upper().strip()
+        events = [
+            event for event in events
+            if event.get("target", "").upper() == normalized
+            or str(event.get("metadata", {}).get("line_id", "")).upper() == normalized
+        ]
+    return events[:limit]
+
+
+def export_data(guild_id: int | str) -> dict:
+    data = _load_store()
+    guild = _guild(data, guild_id)
+    return {
+        "guild_id": str(guild_id),
+        "exported_at": _now(),
+        "storage_path": str(economy_path()),
+        "wallets": list(guild["wallets"].values()),
+        "wager_lines": list(guild["lines"].values()),
+        "wagers": list(guild["wagers"].values()),
+        "transactions": guild["transactions"],
+        "audit": guild["audit"],
+        "ledger_posts": guild["ledger_posts"],
+    }
+
+
+def health(guild_id: int | str) -> dict:
+    data = _load_store()
+    guild = _guild(data, guild_id)
+    path = economy_path()
+    active_lines = [
+        line for line in guild["lines"].values()
+        if line.get("status") in {"created", "open", "closed", "locked"}
+    ]
+    placed_wagers = [
+        wager for wager in guild["wagers"].values()
+        if wager.get("status") == "placed"
+    ]
+    cfg = guild_config_service.get_guild_config(guild_id)
+    return {
+        "guild_id": str(guild_id),
+        "economy_enabled": bool(cfg.get("betting_enabled")),
+        "storage_path": str(path),
+        "storage_exists": path.exists(),
+        "wallet_count": len(guild["wallets"]),
+        "line_count": len(guild["lines"]),
+        "active_line_count": len(active_lines),
+        "placed_wager_count": len(placed_wagers),
+        "transaction_count": len(guild["transactions"]),
+        "audit_count": len(guild["audit"]),
+        "ledger_post_count": len(guild["ledger_posts"]),
+    }
 
 
 def _match_status(guild_id: int | str, match_id: str, provider=None) -> str:
