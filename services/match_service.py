@@ -309,10 +309,15 @@ def _selected_gods(game: dict) -> list[str]:
     if isinstance(game.get("selected_gods"), list):
         return [str(item) for item in game.get("selected_gods", [])]
     picks = []
-    for key in ("blue_picks", "red_picks", "order_picks", "chaos_picks"):
-        values = game.get(key) or []
-        if isinstance(values, list):
-            picks.extend(str(item) for item in values)
+    nested = game.get("picks") or {}
+    if isinstance(nested, dict):
+        picks.extend(str(item) for item in nested.get("blue", []))
+        picks.extend(str(item) for item in nested.get("red",  []))
+    if not picks:
+        for key in ("blue_picks", "red_picks", "order_picks", "chaos_picks"):
+            values = game.get(key) or []
+            if isinstance(values, list):
+                picks.extend(str(item) for item in values)
     return picks
 
 
@@ -339,8 +344,10 @@ def _draft_payload(
         "game_number": game_number,
         "draft_sequence": game.get("draft_sequence") or payload.get("draft_sequence") or "",
         "status": status,
-        "picks": list(game.get("blue_picks") or game.get("order_picks") or []) + list(game.get("red_picks") or game.get("chaos_picks") or []),
-        "bans": list(game.get("blue_bans") or game.get("order_bans") or []) + list(game.get("red_bans") or game.get("chaos_bans") or []),
+        "picks": list((game.get("picks") or {}).get("blue", []) or game.get("blue_picks") or game.get("order_picks") or []) +
+                 list((game.get("picks") or {}).get("red",  []) or game.get("red_picks")  or game.get("chaos_picks") or []),
+        "bans":  list((game.get("bans")  or {}).get("blue", []) or game.get("blue_bans")  or game.get("order_bans")  or []) +
+                 list((game.get("bans")  or {}).get("red",  []) or game.get("red_bans")   or game.get("chaos_bans")  or []),
         "selected_gods": _selected_gods(game),
         "imported_at": imported_at,
         "forgelens_match_id": explicit_match_id.upper().strip(),
