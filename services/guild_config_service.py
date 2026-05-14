@@ -1,4 +1,6 @@
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import config
@@ -22,8 +24,23 @@ def _load_store() -> dict:
 
 
 def _save_store(data: dict) -> None:
-    with Path(GUILD_CONFIG_FILE).open("w") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
+    path = Path(GUILD_CONFIG_FILE)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=str(path.parent) if path.parent != Path(".") else None,
+            delete=False,
+            suffix=".tmp",
+            encoding="utf-8",
+        ) as tmp:
+            json.dump(data, tmp, indent=2, sort_keys=True)
+            tmp.flush()
+            tmp_path = Path(tmp.name)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink()
 
 
 def _guild_key(guild_id: int | str) -> str:
@@ -118,4 +135,3 @@ def _legacy_active_season(guild_id: int | str) -> dict | None:
     }
     save_active_season(guild_id, season["sheet_id"], season["season_name"])
     return season
-
